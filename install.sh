@@ -65,7 +65,7 @@ asset="${BIN_NAME}-${plat}-${a}"
 # --- resolve version ---------------------------------------------------------
 version="${ZSC_AGENT_VERSION:-}"
 if [ -z "$version" ]; then
-  info "Resolving latest release of $REPO…"
+  info "Resolving latest release of ${REPO}..."
   version="$(dl_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
     | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
   [ -n "$version" ] || err "could not resolve latest release tag (set ZSC_AGENT_VERSION)"
@@ -79,7 +79,7 @@ trap 'rm -rf "$tmp"' EXIT
 base="https://github.com/${REPO}/releases/download/${version}"
 dl "${base}/${asset}" "${tmp}/${BIN_NAME}" || err "failed to download ${asset} (published for ${plat}-${a}?)"
 if dl "${base}/${asset}.sha256" "${tmp}/${asset}.sha256" 2>/dev/null; then
-  info "Verifying checksum…"
+  info "Verifying checksum..."
   expected="$(awk '{print $1}' "${tmp}/${asset}.sha256")"
   if command -v sha256sum >/dev/null 2>&1; then
     actual="$(sha256sum "${tmp}/${BIN_NAME}" | awk '{print $1}')"
@@ -92,9 +92,24 @@ else
 fi
 chmod +x "${tmp}/${BIN_NAME}"
 
+# --- ad-hoc codesign on Apple Silicon ---------------------------------------
+# Apple Silicon SIGKILLs unsigned arm64 Mach-O binaries at exec. The release
+# pipeline signs the published binary, but re-sign here too (belt and suspenders)
+# while it still lives in the writable temp dir — signing in the root-owned
+# install dir would fail. Intel macOS runs unsigned binaries fine, so gate on
+# arm64. Best-effort: warn, never fail.
+if [ "$plat" = "macos" ] && [ "$a" = "arm64" ] && command -v codesign >/dev/null 2>&1; then
+  info "Ad-hoc signing the binary for Apple Silicon..."
+  xattr -c "${tmp}/${BIN_NAME}" 2>/dev/null || true
+  if ! codesign -s - -f "${tmp}/${BIN_NAME}" >/dev/null 2>&1; then
+    info "codesign failed. If 'zsc-agent' is killed on launch, run:"
+    info "  c=\$(mktemp) && cp \"${INSTALL_DIR}/${BIN_NAME}\" \"\$c\" && xattr -c \"\$c\" && codesign -s - -f \"\$c\" && sudo cp \"\$c\" \"${INSTALL_DIR}/${BIN_NAME}\""
+  fi
+fi
+
 # --- fetch frpc for this arch ------------------------------------------------
 # frpc is spawned as a child process, so it lives on disk (not in the binary).
-info "Fetching frpc ${FRP_VERSION} (${frpos}/${frparch})…"
+info "Fetching frpc ${FRP_VERSION} (${frpos}/${frparch})..."
 frp_archive="frp_${FRP_VERSION}_${frpos}_${frparch}.tar.gz"
 dl "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/${frp_archive}" "${tmp}/${frp_archive}" \
   || err "failed to download frpc ${frp_archive}"
@@ -119,7 +134,7 @@ info "Installed $BIN_NAME to $target and frpc to ${LIB_DIR}/frpc"
 if [ "${ZSC_AGENT_NO_SERVICE:-0}" = "1" ]; then
   printf '\nSkipping service install (ZSC_AGENT_NO_SERVICE=1).\nRun \033[1msudo %s install-service\033[0m when ready.\n' "$BIN_NAME"
 else
-  info "Registering the agent as a service…"
+  info "Registering the agent as a service..."
   # Pass the actual frpc location so the service persists it (matters when
   # ZSC_AGENT_LIB_DIR points frpc somewhere other than the default path).
   if sudo FRPC_BINARY_PATH="${LIB_DIR}/frpc" "$target" install-service; then
