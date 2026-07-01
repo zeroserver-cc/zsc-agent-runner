@@ -95,7 +95,7 @@ chmod +x "${tmp}/${BIN_NAME}"
 # --- ad-hoc codesign on Apple Silicon ---------------------------------------
 # Apple Silicon SIGKILLs unsigned arm64 Mach-O binaries at exec. The release
 # pipeline signs the published binary, but re-sign here too (belt and suspenders)
-# while it still lives in the writable temp dir — signing in the root-owned
+# while it still lives in the writable temp dir - signing in the root-owned
 # install dir would fail. Intel macOS runs unsigned binaries fine, so gate on
 # arm64. Best-effort: warn, never fail.
 if [ "$plat" = "macos" ] && [ "$a" = "arm64" ] && command -v codesign >/dev/null 2>&1; then
