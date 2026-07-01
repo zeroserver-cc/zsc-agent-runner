@@ -15,6 +15,8 @@
 #   ZSC_AGENT_LIB_DIR     dir for frpc (default: /usr/local/lib/zsc-agent)
 #   ZSC_AGENT_NO_SERVICE  set to 1 to skip the service install step
 #   FRP_VERSION           frp version for frpc (default: 0.61.1)
+#   BACKEND_URL           backend API base (default: https://api.zeroserver.cc/api/v1;
+#                         override for a self-hosted/local backend)
 set -eu
 
 REPO="zeroserver-cc/zsc-agent-runner"
@@ -137,7 +139,10 @@ else
   info "Registering the agent as a service..."
   # Pass the actual frpc location so the service persists it (matters when
   # ZSC_AGENT_LIB_DIR points frpc somewhere other than the default path).
-  if sudo FRPC_BINARY_PATH="${LIB_DIR}/frpc" "$target" install-service; then
+  # Forward BACKEND_URL when the caller set one, so the service persists it
+  # (curl ... | BACKEND_URL=https://my-backend sh). Otherwise the agent uses its
+  # production default.
+  if sudo ${BACKEND_URL:+BACKEND_URL="$BACKEND_URL"} FRPC_BINARY_PATH="${LIB_DIR}/frpc" "$target" install-service; then
     info "Agent service installed."
   else
     printf '\nService install did not complete (Docker required, run as root).\n'
