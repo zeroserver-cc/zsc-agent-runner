@@ -5,15 +5,28 @@
 #
 # Downloads the standalone zsc-agent binary for this OS/arch from the GitHub
 # Releases of zeroserver-cc/zsc-agent-runner (public), verifies its checksum, installs it to
-# /usr/local/bin/zsc-agent, fetches the matching-arch frpc next to it, and
-# registers the agent as a service (systemd on Linux, launchd on macOS).
-# No Node.js required. Idempotent.
+# /usr/local/bin/zsc-agent, fetches the matching-arch frpc next to it, and then
+# delegates to `zsc-agent setup`, which installs dependencies (Docker runtime),
+# registers the agent as a service (systemd on Linux, launchd on macOS) and
+# prints the claim token. No Node.js required. Idempotent.
+#
+# Arguments after `--` are forwarded to `zsc-agent setup`, e.g.:
+#   sh install.sh -- --non-interactive --container-runtime docker-desktop
+# Without a TTY the script adds --non-interactive automatically.
 #
 # Env overrides:
 #   ZSC_AGENT_VERSION     release tag to install (default: latest)
 #   ZSC_AGENT_INSTALL_DIR install dir for the binary (default: /usr/local/bin)
 #   ZSC_AGENT_LIB_DIR     dir for frpc (default: /usr/local/lib/zsc-agent)
+#   ZSC_AGENT_CONFIG_DIR  dir for agent config/token (default: /var/lib/zsc-agent on Linux,
+#                         /usr/local/var/zsc-agent on macOS)
 #   ZSC_AGENT_NO_SERVICE  set to 1 to skip the service install step
+#   ZSC_AGENT_SETUP_ARGS  extra args appended to `zsc-agent setup`
+#   ZSC_AGENT_LEGACY_INSTALL  set to 1 for the pre-setup flow (install-service
+#                         + token poll in shell), kept as a rollback path
+#   ZSC_CONTAINER_RUNTIME macOS runtime: colima | docker-desktop | skip
+#   ZSC_DOCKER            Docker setup: install | skip
+#   ZSC_INGRESS           set to "false" to disable the FRP ingress tunnel
 #   FRP_VERSION           frp version for frpc (default: 0.61.1)
 #   BACKEND_URL           backend API base (default: https://api.zeroserver.cc/api/v1;
 #                         override for a self-hosted/local backend)
@@ -63,6 +76,15 @@ case "$arch" in
   *) err "unsupported arch: $arch" ;;
 esac
 asset="${BIN_NAME}-${plat}-${a}"
+
+# Config directory must match the service unit written by `zsc-agent install-service`
+# (see ServiceInstaller.resolveConfigDir). The token command needs it to read the
+# machine token generated on first startup. Override via ZSC_AGENT_CONFIG_DIR.
+case "$plat" in
+  linux) CONFIG_DIR="${ZSC_AGENT_CONFIG_DIR:-/var/lib/zsc-agent}" ;;
+  macos) CONFIG_DIR="${ZSC_AGENT_CONFIG_DIR:-/usr/local/var/zsc-agent}" ;;
+  *) err "unsupported platform for config directory: $plat" ;;
+esac
 
 # --- resolve version ---------------------------------------------------------
 version="${ZSC_AGENT_VERSION:-}"
@@ -132,7 +154,46 @@ sudo_if_needed "$LIB_DIR" chmod +x "${LIB_DIR}/frpc"
 
 info "Installed $BIN_NAME to $target and frpc to ${LIB_DIR}/frpc"
 
-# --- register service --------------------------------------------------------
+# --- setup: dependencies, service, claim token --------------------------------
+if [ "${ZSC_AGENT_LEGACY_INSTALL:-0}" != "1" ]; then
+  # Delegate to `zsc-agent setup` (deps + service + claim token live in the
+  # binary, where they are unit-tested). Args after `--` and ZSC_AGENT_SETUP_ARGS
+  # are forwarded; without a usable TTY we force --non-interactive so the flow
+  # never blocks on input that will never come.
+  setup_args="${ZSC_AGENT_SETUP_ARGS:-}"
+  for arg in "$@"; do
+    [ "$arg" = "--" ] || setup_args="${setup_args} ${arg}"
+  done
+  if [ "${ZSC_AGENT_NO_SERVICE:-0}" = "1" ]; then
+    setup_args="${setup_args} --no-service"
+  fi
+  if ! (: <>/dev/tty) 2>/dev/null; then
+    case "${setup_args}" in
+      *--non-interactive*) ;;
+      *) setup_args="--non-interactive${setup_args}" ;;
+    esac
+  fi
+
+  info "Running setup (dependencies, service, claim token)..."
+  # Pass the actual frpc location so the service persists it (matters when
+  # ZSC_AGENT_LIB_DIR points frpc somewhere other than the default path), and
+  # forward BACKEND_URL/setup env vars through sudo's env scrubbing.
+  # shellcheck disable=SC2086 # setup_args is intentionally word-split
+  if sudo ${BACKEND_URL:+BACKEND_URL="$BACKEND_URL"} \
+      ${ZSC_CONTAINER_RUNTIME:+ZSC_CONTAINER_RUNTIME="$ZSC_CONTAINER_RUNTIME"} \
+      ${ZSC_DOCKER:+ZSC_DOCKER="$ZSC_DOCKER"} \
+      ${ZSC_INGRESS:+ZSC_INGRESS="$ZSC_INGRESS"} \
+      CONFIG_DIR="$CONFIG_DIR" FRPC_BINARY_PATH="${LIB_DIR}/frpc" \
+      "$target" setup ${setup_args}; then
+    info "Setup complete."
+  else
+    printf '\nSetup did not complete.\n'
+    printf 'Fix the issue reported above and finish with: \033[1msudo %s setup\033[0m\n' "$BIN_NAME"
+  fi
+  exit 0
+fi
+
+# --- legacy path (ZSC_AGENT_LEGACY_INSTALL=1): service + token poll in shell --
 if [ "${ZSC_AGENT_NO_SERVICE:-0}" = "1" ]; then
   printf '\nSkipping service install (ZSC_AGENT_NO_SERVICE=1).\nRun \033[1msudo %s install-service\033[0m when ready.\n' "$BIN_NAME"
 else
@@ -142,8 +203,37 @@ else
   # Forward BACKEND_URL when the caller set one, so the service persists it
   # (curl ... | BACKEND_URL=https://my-backend sh). Otherwise the agent uses its
   # production default.
-  if sudo ${BACKEND_URL:+BACKEND_URL="$BACKEND_URL"} FRPC_BINARY_PATH="${LIB_DIR}/frpc" "$target" install-service; then
+  if sudo ${BACKEND_URL:+BACKEND_URL="$BACKEND_URL"} CONFIG_DIR="$CONFIG_DIR" FRPC_BINARY_PATH="${LIB_DIR}/frpc" "$target" install-service; then
     info "Agent service installed."
+
+    # The agent generates the claim token on first startup. Poll for it so the
+    # provider sees the token and QR code right after install instead of having
+    # to tail logs and hunt for it.
+    info "Waiting for the agent to register and generate the claim token..."
+    token_wait=0
+    token_max_wait=60
+    while [ "$token_wait" -lt "$token_max_wait" ]; do
+      token_output="$(sudo CONFIG_DIR="$CONFIG_DIR" "$target" token 2>/dev/null || true)"
+      if printf '%s' "$token_output" | grep -q "Machine Token:"; then
+        printf '\n'
+        printf '\033[1;32m=== MACHINE CLAIM TOKEN ===\033[0m\n'
+        printf '%s\n' "$token_output"
+        printf '\033[1;32m===========================\033[0m\n'
+        break
+      fi
+      sleep 1
+      token_wait=$((token_wait + 1))
+    done
+    if [ "$token_wait" -ge "$token_max_wait" ]; then
+      printf '\n'
+      info "Token not ready yet. To claim this machine, run:"
+      printf '  sudo CONFIG_DIR=%s %s token\n' "$CONFIG_DIR" "$target"
+      printf 'Or follow the logs:\n'
+      case "$plat" in
+        linux) printf '  sudo journalctl -u zsc-agent -f\n' ;;
+        macos) printf '  sudo tail -f %s/agent.log\n' "$CONFIG_DIR" ;;
+      esac
+    fi
   else
     printf '\nService install did not complete (Docker required, run as root).\n'
     printf 'Once Docker is running, finish with: \033[1msudo %s install-service\033[0m\n' "$BIN_NAME"
