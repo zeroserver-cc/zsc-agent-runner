@@ -87,13 +87,29 @@ case "$plat" in
 esac
 
 # --- resolve version ---------------------------------------------------------
+# Resolve via the HTML redirect of /releases/latest (ends at /releases/tag/<tag>)
+# instead of the REST API: api.github.com is rate-limited to 60 req/h per IP for
+# unauthenticated callers, which breaks installs whenever the limit is hit. The
+# API remains as a fallback.
+resolve_latest_tag() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" \
+      | sed -n 's#.*/releases/tag/\([^/[:space:]]*\).*#\1#p'
+  else
+    wget -qS -O /dev/null "https://github.com/${REPO}/releases/latest" 2>&1 \
+      | sed -n 's#.*[Ll]ocation: .*/releases/tag/\([^/[:space:]]*\).*#\1#p' | tail -n1
+  fi
+}
 version="${ZSC_AGENT_VERSION:-}"
 if [ -z "$version" ]; then
   info "Resolving latest release of ${REPO}..."
-  version="$(dl_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
-  [ -n "$version" ] || err "could not resolve latest release tag (set ZSC_AGENT_VERSION)"
+  version="$(resolve_latest_tag || true)"
 fi
+if [ -z "$version" ]; then
+  version="$(dl_stdout "https://api.github.com/repos/${REPO}/releases/latest" \
+    | grep '"tag_name"' | head -n1 | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/' || true)"
+fi
+[ -n "$version" ] || err "could not resolve latest release tag (set ZSC_AGENT_VERSION)"
 info "Installing $REPO $version ($asset)"
 
 tmp="$(mktemp -d)"
