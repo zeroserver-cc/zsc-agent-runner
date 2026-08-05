@@ -27,6 +27,10 @@
 #   ZSC_CONTAINER_RUNTIME macOS runtime: colima | docker-desktop | skip
 #   ZSC_DOCKER            Docker setup: install | skip
 #   ZSC_INGRESS           set to "false" to disable the FRP ingress tunnel
+#   ZSC_SWARM_ENABLED     set to "false" to opt out of the swarm storage mesh
+#                         (default: on; persisted into the installed service)
+#   ZSC_SWARM_OFFERED_BYTES  absolute override of the disk offered to the swarm
+#                         (default: min(10% of free disk, 20 GiB); 0 = consume only)
 #   FRP_VERSION           frp version for frpc (default: 0.61.1)
 #   BACKEND_URL           backend API base (default: https://api.zeroserver.cc/api/v1;
 #                         override for a self-hosted/local backend)
@@ -199,6 +203,8 @@ if [ "${ZSC_AGENT_LEGACY_INSTALL:-0}" != "1" ]; then
       ${ZSC_CONTAINER_RUNTIME:+ZSC_CONTAINER_RUNTIME="$ZSC_CONTAINER_RUNTIME"} \
       ${ZSC_DOCKER:+ZSC_DOCKER="$ZSC_DOCKER"} \
       ${ZSC_INGRESS:+ZSC_INGRESS="$ZSC_INGRESS"} \
+      ${ZSC_SWARM_ENABLED:+ZSC_SWARM_ENABLED="$ZSC_SWARM_ENABLED"} \
+      ${ZSC_SWARM_OFFERED_BYTES:+ZSC_SWARM_OFFERED_BYTES="$ZSC_SWARM_OFFERED_BYTES"} \
       CONFIG_DIR="$CONFIG_DIR" FRPC_BINARY_PATH="${LIB_DIR}/frpc" \
       "$target" setup ${setup_args}; then
     info "Setup complete."
