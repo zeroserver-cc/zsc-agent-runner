@@ -162,7 +162,37 @@ frpc_src="${tmp}/frp_${FRP_VERSION}_${frpos}_${frparch}/frpc"
 [ -f "$frpc_src" ] || err "frpc not found inside ${frp_archive}"
 chmod +x "$frpc_src"
 
-# --- install binary + frpc (sudo only if needed) ----------------------------
+# --- fetch zsc-env-exec (sealed env entrypoint wrapper) ----------------------
+# Static Go binary mounted read-only into containers whose env is sealed
+# (secrets por aplicacao). The agent picks the binary by the DOCKER DAEMON
+# arch (docker info), which can differ from the host arch (Docker Desktop VMs,
+# remote daemons), so BOTH linux arches are installed. Older releases lack
+# these assets: warn and continue, sealed deploys then fail with a clear
+# agent-side error instead of breaking the whole install.
+verify_sha256() {
+  # $1 = file to verify, $2 = .sha256 file with the expected hash
+  expected="$(awk '{print $1}' "$2")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$1" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$1" | awk '{print $1}')"
+  fi
+  [ "$expected" = "$actual" ] || err "checksum mismatch for $(basename "$1") (expected $expected, got $actual)"
+}
+info "Fetching zsc-env-exec (linux amd64/arm64)..."
+for goarch in amd64 arm64; do
+  wasset="zsc-env-exec-linux-${goarch}"
+  if dl "${base}/${wasset}" "${tmp}/${wasset}" 2>/dev/null; then
+    dl "${base}/${wasset}.sha256" "${tmp}/${wasset}.sha256" 2>/dev/null \
+      || err "checksum missing for ${wasset}; refusing to install an unverified wrapper"
+    verify_sha256 "${tmp}/${wasset}" "${tmp}/${wasset}.sha256"
+    chmod +x "${tmp}/${wasset}"
+  else
+    info "${wasset} not published in ${version}; sealed secrets will be unavailable on this node."
+  fi
+done
+
+# --- install binary + frpc + zsc-env-exec (sudo only if needed) --------------
 target="${INSTALL_DIR}/${BIN_NAME}"
 sudo_if_needed "$(dirname "$INSTALL_DIR")" mkdir -p "$INSTALL_DIR"
 sudo_if_needed "$INSTALL_DIR" mv "${tmp}/${BIN_NAME}" "$target"
@@ -172,7 +202,15 @@ sudo_if_needed "$(dirname "$LIB_DIR")" mkdir -p "$LIB_DIR"
 sudo_if_needed "$LIB_DIR" mv "$frpc_src" "${LIB_DIR}/frpc"
 sudo_if_needed "$LIB_DIR" chmod +x "${LIB_DIR}/frpc"
 
-info "Installed $BIN_NAME to $target and frpc to ${LIB_DIR}/frpc"
+for goarch in amd64 arm64; do
+  wasset="zsc-env-exec-linux-${goarch}"
+  if [ -f "${tmp}/${wasset}" ]; then
+    sudo_if_needed "$LIB_DIR" mv "${tmp}/${wasset}" "${LIB_DIR}/${wasset}"
+    sudo_if_needed "$LIB_DIR" chmod +x "${LIB_DIR}/${wasset}"
+  fi
+done
+
+info "Installed $BIN_NAME to $target, frpc and zsc-env-exec to ${LIB_DIR}"
 
 # --- setup: dependencies, service, claim token --------------------------------
 if [ "${ZSC_AGENT_LEGACY_INSTALL:-0}" != "1" ]; then
